@@ -1,0 +1,61 @@
+param(
+    [Parameter(Mandatory=$true)]
+    [ValidateSet('QuickTest','FullTest','CollectFull','RemoveReg')]
+    [string]$TestType
+)
+
+# Registry paths and values
+$regPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+$auditReceiving = 'AuditReceivingNTLMTraffic'
+$auditOutgoing  = 'AuditOutgoingNTLMTraffic'
+
+# Function to update Ninja custom field (Ninja-specific syntax)
+function Update-NinjaField($status) {
+    Ninja-Property-Set ntlmEnabled '$status'
+}
+
+switch ($TestType) {
+
+    'QuickTest' {
+        try {
+            # Silent SMB test via NTLM
+            New-PSDrive -Name "TestNTLM" -PSProvider FileSystem -Root "\\127.0.0.1\C$" -Credential $null -ErrorAction Stop | Out-Null
+            Remove-PSDrive -Name "TestNTLM" -Force | Out-Null
+
+            # Check recent event logs for NTLM
+            $events = Get-WinEvent -LogName Security -FilterXPath "*[System[(EventID=4624)]]" -MaxEvents 5 | Where-Object {
+                $_.Properties[10].Value -match "NTLM"
+            }
+
+            if ($events) { Update-NinjaField "Yes, Quick" }
+            else { Update-NinjaField "No" }
+        }
+        catch { Update-NinjaField "No" }
+    }
+
+    'FullTest' {
+        # Set registry for full NTLM auditing
+        Set-ItemProperty -Path $regPath -Name $auditReceiving -Value 1 -Type DWord
+        Set-ItemProperty -Path $regPath -Name $auditOutgoing  -Value 1 -Type DWord
+
+        Update-NinjaField "Logging Enabled"
+    }
+
+    'CollectFull' {
+        # Check event logs for NTLM over audit period
+        $events = Get-WinEvent -LogName Security -FilterXPath "Event[System[(EventID=4624)]]" -MaxEvents 1000 | Where-Object {
+            $_.Properties[10].Value -match 'NTLM'
+        }
+
+        if ($events) { Update-NinjaField "Yes, Full" }
+        else { Update-NinjaField "No" }
+    }
+
+    'RemoveReg' {
+        # Reset registry to defaults
+        Set-ItemProperty -Path $regPath -Name $auditReceiving -Value 0 -Type DWord
+        Set-ItemProperty -Path $regPath -Name $auditOutgoing  -Value 0 -Type DWord
+
+        Update-NinjaField "Logging Removed"
+    }
+}

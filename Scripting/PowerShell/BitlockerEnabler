@@ -1,0 +1,144 @@
+<#
+.SYNOPSIS
+    Checks for BitLocker prerequisites and enables it on the OS drive if they are met.
+    Designed for silent, automated deployment via RMM.
+
+.DESCRIPTION
+    This script performs the following actions:
+    1.  Verifies the Windows OS is a supported edition (Pro, Enterprise, Education).
+    2.  Checks if the OS drive is already encrypted.
+    3.  Verifies a TPM is present and ready, attempting to initialize it if necessary.
+    4.  If all checks pass, it enables BitLocker on the OS drive using the TPM protector.
+    5.  Adds a numerical recovery password protector, which RMM tools can scrape and store.
+    6.  Uses -UsedSpaceOnly for faster initial encryption.
+
+.NOTES
+    Author: Me
+    Date: 2025-07-14
+    Version: 1.1
+
+    Exit Codes:
+    0: Success - BitLocker initiated or was already enabled.
+    2: Unsupported Windows Edition (e.g., Home).
+    3: TPM is not present on the system.
+    4: TPM could not be made ready.
+    5: Failed to get BitLocker volume information.
+    6: Failed to enable BitLocker.
+    7: Failed to add the recovery password protector.
+    99: Unknown error.
+#>
+[CmdletBinding()]
+param()
+
+# Start logging
+$LogPath = "C:\Windows\Temp\Enable-BitLocker-Log.txt"
+Start-Transcript -Path $LogPath -Append -Force
+Write-Host "--- Starting BitLocker Enablement Script on $(Get-Date) ---"
+
+#region Pre-Flight Checks
+
+# 2. Windows Edition Check
+Write-Host "Checking Windows Edition..."
+try {
+    $OsEdition = (Get-CimInstance -ClassName Win32_OperatingSystem).Caption
+    if ($OsEdition -notmatch "Pro|Enterprise|Education") {
+        Write-Error "Execution failed: Unsupported Windows Edition ('$OsEdition'). BitLocker requires Pro, Enterprise, or Education."
+        Stop-Transcript
+        exit 2
+    }
+    Write-Host "OK: Supported Windows Edition found: $OsEdition"
+}
+catch {
+    Write-Error "Could not determine Windows Edition. $_"
+    Stop-Transcript
+    exit 99
+}
+
+
+# 3. Get OS Volume and Check Encryption Status
+$OsDriveLetter = $env:SystemDrive
+Write-Host "Checking BitLocker status for OS volume ($OsDriveLetter)..."
+try {
+    $BitLockerVolume = Get-BitLockerVolume -MountPoint $OsDriveLetter
+    if ($BitLockerVolume.VolumeStatus -in @('FullyEncrypted', 'EncryptionInProgress')) {
+        Write-Host "SUCCESS: BitLocker is already enabled or in progress on $OsDriveLetter. No action needed."
+        Stop-Transcript
+        exit 0
+    }
+    Write-Host "OK: BitLocker is not enabled on $OsDriveLetter. Proceeding with checks."
+}
+catch {
+    # If the Get-BitLockerVolume fails, it might be because the feature is not installed.
+    # We will proceed, as the enablement step will handle this.
+    Write-Warning "Could not get BitLocker volume status. This is normal if the BitLocker feature is not yet installed. Continuing..."
+}
+
+
+# 4. TPM Status Check
+Write-Host "Checking TPM status..."
+try {
+    $Tpm = Get-Tpm
+    if (-not $Tpm.TpmPresent) {
+        Write-Error "Execution failed: TPM chip not found on this system."
+        Stop-Transcript
+        exit 3
+    }
+
+    if (-not $Tpm.TpmReady) {
+        Write-Warning "TPM is present but not ready. Attempting to initialize..."
+        Initialize-Tpm -AllowClear
+        # Re-check status after initialization attempt
+        $Tpm = Get-Tpm
+        if (-not $Tpm.TpmReady) {
+            Write-Error "Execution failed: Failed to initialize the TPM. Manual intervention in BIOS/UEFI may be required."
+            Stop-Transcript
+            exit 4
+        }
+    }
+    Write-Host "OK: TPM is present and ready."
+}
+catch {
+    Write-Error "An error occurred while checking TPM status. Error: $_"
+    Stop-Transcript
+    exit 99
+}
+
+#endregion Pre-Flight Checks
+
+#region Enablement
+Write-Host "All prerequisites met. Attempting to enable BitLocker..."
+
+try {
+    # Enable BitLocker with the TPM protector first. This is the primary, seamless protector.
+    Write-Host "Enabling BitLocker with TPM protector on $OsDriveLetter..."
+    Enable-BitLocker -MountPoint $OsDriveLetter -TpmProtector -UsedSpaceOnly -SkipHardwareTest
+
+    # Immediately add a numerical recovery password. This is the key your RMM will capture.
+    Write-Host "Adding Numerical Recovery Password protector..."
+    Add-BitLockerKeyProtector -MountPoint $OsDriveLetter -RecoveryPasswordProtector
+
+    # Final Verification
+    $FinalStatus = (Get-BitLockerVolume -MountPoint $OsDriveLetter).VolumeStatus
+    Write-Host "SUCCESS: BitLocker encryption has been initiated. Current status: $FinalStatus"
+    Write-Host "The recovery key has been generated and should be automatically captured by NinjaRMM."
+    Stop-Transcript
+    exit 0
+}
+catch {
+    Write-Error "A critical error occurred during BitLocker enablement. Error: $_"
+    # Differentiate between a failure to enable and a failure to add the key
+    if ($_.FullyQualifiedErrorId -like "*EnableBitLocker*") {
+        Stop-Transcript
+        exit 6
+    }
+    elseif ($_.FullyQualifiedErrorId -like "*AddBitLockerKeyProtector*") {
+        Write-Warning "BitLocker may be enabled with TPM, but failed to add the recovery password protector. Manual intervention required."
+        Stop-Transcript
+        exit 7
+    }
+    else {
+        Stop-Transcript
+        exit 99
+    }
+}
+#endregion Enablement
