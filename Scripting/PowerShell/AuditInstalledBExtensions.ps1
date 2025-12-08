@@ -1,21 +1,21 @@
 <#
-Browser Extension Snapshot -> Datto RMM UDF7 (Custom7)
-Version: 2.1
+AuditInstalledBrowserExtensions v3.0
 
-Changes vs v2.0:
-- Removes single-line delimiter mode (no pipe-joined output).
-- Adds hard fallback: if UDF payload > 255 chars, write summary:
-  "\<\#\> Extensions \<\#\> Browsers"
-- Still honors:
-  - one UDF only (Custom7)
-  - sorted output
-  - IDs when <= 8 total extensions
-  - compressed names when > 8
-  - Firefox support
-  - local log path under ProgramData\ScriptWork
-- Uses REG ADD for reliable agent pickup.
+Purpose:
+- Enumerate extensions across:
+  - Chrome
+  - Edge
+  - Firefox
+  - Vivaldi
+- Build $content containing full data:
+  "ExtensionId | Name | Browsers"
+- No char counting
+- No UDF writes
+- Output full $content to StdOut for Datto email capture
+- Write a local log under C:\ProgramData\ScriptWork
 
-Run as SYSTEM in Datto.
+Run context:
+- Works in user/admin/SYSTEM. SYSTEM is fine for reading most profiles.
 #>
 
 param(
@@ -27,11 +27,8 @@ $ErrorActionPreference = "SilentlyContinue"
 # ----------------------------
 # Config
 # ----------------------------
-$UdfValueName = "Custom7"
-$RegKeyPath   = "HKLM\SOFTWARE\CentraStage"
-
 $LogDir  = "C:\ProgramData\ScriptWork\ExtensionAudit"
-$LogFile = Join-Path $LogDir "browser_extensions_udf7.txt"
+$LogFile = Join-Path $LogDir "browser_extensions_full_stdout.txt"
 
 $ChromiumDefs = @(
     @{ Browser = "Chrome";  RelPath = "AppData\Local\Google\Chrome\User Data" },
@@ -69,7 +66,7 @@ function Resolve-ChromiumName {
         $m = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $nameRaw = [string]$m.name
 
-        # Resolve __MSG_*__ names if possible
+        # Try to resolve __MSG_*__ names
         if ($nameRaw -match '^__MSG_(.+)__$' -and $m.default_locale) {
             $key = $Matches[1]
             $manifestDir = Split-Path -Parent $ManifestPath
@@ -116,7 +113,7 @@ function Get-Firefox-ExtensionsFromProfile {
                 } elseif ($a.name) {
                     $nm = [string]$a.name
                 }
-            } catch {}
+            } catch { }
 
             $results.Add([pscustomobject]@{
                 ExtensionId = $id
@@ -127,43 +124,6 @@ function Get-Firefox-ExtensionsFromProfile {
     catch { }
 
     return $results
-}
-
-function Compress-Name {
-    param([string]$Name, [string]$FallbackId)
-
-    $n = $Name
-    if ([string]::IsNullOrWhiteSpace($n)) { $n = $FallbackId }
-
-    # Remove whitespace to save chars
-    $n = ($n -replace "\s+","").Trim()
-
-    # Cap to 32 chars
-    if ($n.Length -gt 32) { $n = $n.Substring(0,32) }
-
-    return $n
-}
-
-function Build-Multiline {
-    param(
-        [string[]]$Items,
-        [string]$InlineText
-    )
-
-    $itemsSorted = $Items |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-        Sort-Object
-
-    $body = ($itemsSorted -join "`r`n")
-    if ($InlineText) { return ($InlineText + "`r`n" + $body) }
-    return $body
-}
-
-function Get-RegExePath {
-    if (Test-Path "$env:windir\sysnative\reg.exe") {
-        return "$env:windir\sysnative\reg.exe"
-    }
-    return "$env:windir\system32\reg.exe"
 }
 
 # ----------------------------
@@ -226,7 +186,7 @@ foreach ($u in Get-UserDirs) {
 }
 
 # ----------------------------
-# Build unique device-wide set with browser context
+# Build unified view: ExtensionId + Name + Browsers
 # ----------------------------
 $unique = $records |
     Where-Object { -not [string]::IsNullOrWhiteSpace($_.ExtensionId) } |
@@ -241,42 +201,22 @@ $unique = $records |
             Name        = $namePick
             Browsers    = ($browsers -join ",")
         }
-    }
-
-$totalExtensions = ($unique | Measure-Object).Count
-$browserCount = ($records | Select-Object -ExpandProperty Browser | Sort-Object -Unique | Measure-Object).Count
+    } |
+    Sort-Object ExtensionId
 
 # ----------------------------
-# Choose content (IDs vs Names)
+# Build $content
 # ----------------------------
-if ($totalExtensions -gt 8) {
-    $items = $unique | ForEach-Object { Compress-Name -Name $_.Name -FallbackId $_.ExtensionId }
+$lines = foreach ($u in $unique) {
+    $nm = $u.Name
+    if ([string]::IsNullOrWhiteSpace($nm)) { $nm = "" }
+    "$($u.ExtensionId) | $nm | $($u.Browsers)"
+}
+
+if ($InlineText) {
+    $content = $InlineText + "`r`n" + ($lines -join "`r`n")
 } else {
-    $items = $unique | Select-Object -ExpandProperty ExtensionId
-}
-
-$contentCandidate = Build-Multiline -Items $items -InlineText $InlineText
-
-# ----------------------------
-# Hard fallback if >255 chars
-# ----------------------------
-$summary = "$totalExtensions Extensions, $browserCount Browsers"
-
-if ($contentCandidate.Length -gt 255) {
-    # Try to include InlineText if it still fits
-    if ($InlineText) {
-        $summaryWithInline = Build-Multiline -Items @($summary) -InlineText $InlineText
-        if ($summaryWithInline.Length -le 255) {
-            $content = $summaryWithInline
-        } else {
-            $content = $summary
-        }
-    } else {
-        $content = $summary
-    }
-}
-else {
-    $content = $contentCandidate
+    $content = ($lines -join "`r`n")
 }
 
 # ----------------------------
@@ -287,37 +227,18 @@ New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 $ts = (Get-Date).ToString("s")
 $ctx = [Environment]::UserName
 
-$logLines = @()
-$logLines += "Version=2.1"
-$logLines += "Timestamp=$ts"
-$logLines += "Context=$ctx"
-$logLines += "TotalUniqueExtensions=$totalExtensions"
-$logLines += "BrowserCount=$browserCount"
-if ($InlineText) { $logLines += "InlineText=$InlineText" }
-$logLines += "UDF7PayloadLength=$($content.Length)"
-$logLines += "UDF7Payload=$content"
-$logLines += "---- Unique Extensions (ID | Name | Browsers) ----"
-
-$unique |
-    Sort-Object ExtensionId |
-    ForEach-Object {
-        $nm = $_.Name
-        if ([string]::IsNullOrWhiteSpace($nm)) { $nm = "" }
-        $logLines += ($_.ExtensionId + " | " + $nm + " | " + $_.Browsers)
-    }
-
-$logLines | Set-Content -LiteralPath $LogFile -Encoding UTF8
+@(
+    "Version=3.0"
+    "Timestamp=$ts"
+    "Context=$ctx"
+    "---- ExtensionId | Name | Browsers ----"
+    $lines
+) | Set-Content -LiteralPath $LogFile -Encoding UTF8
 
 # ----------------------------
-# Populate UDF7 via REG ADD (ONLY Custom7)
+# StdOut for Datto email
 # ----------------------------
-$regExe = Get-RegExePath
-
-& $regExe ADD "$RegKeyPath" /f | Out-Null
-& $regExe ADD "$RegKeyPath" /v $UdfValueName /t REG_SZ /d "$content" /f | Out-Null
-
-Write-Host "Wrote ONLY Custom7 via REG ADD."
-Write-Host "Total unique extensions detected: $totalExtensions"
-Write-Host "Browsers detected: $browserCount"
-Write-Host "UDF7 payload length: $($content.Length)"
+Write-Host $env:COMPUTERNAME
+Write-Host $content
+Write-Host ""
 Write-Host "Local log: $LogFile"
