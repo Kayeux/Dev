@@ -16,4 +16,4 @@ foreach ($p in $paths) {
   }
 }
 
-Write-Host "Done. Sign out of VDI completely, sign back in, then try Teams then Outlook."
+Write-Host "Done."
