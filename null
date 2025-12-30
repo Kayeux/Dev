@@ -1,0 +1,19 @@
+Header version 0.1
+Device Generation: 4
+Cols, Rows, NumMemRows : (8, 6, 1)
+TransactionSize: 25976
+NumOps: 833
+PM id:0 has no corresponding pm control packet given by user!!!
+Save/Restore preemption code added for col8
+Header version 1.0
+Device Generation: 4
+Cols, Rows, NumMemRows : (8, 6, 1)
+TransactionSize: 4188
+NumOps: 241
+Optimized HEADER version detected
+Header version 1.0
+Device Generation: 4
+Cols, Rows, NumMemRows : (8, 6, 1)
+TransactionSize: 4572
+NumOps: 273
+Optimized HEADER version detected
