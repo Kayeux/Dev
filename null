@@ -1,8 +1,8 @@
 Header version 0.1
 Device Generation: 4
 Cols, Rows, NumMemRows : (8, 6, 1)
-TransactionSize: 25976
-NumOps: 833
+TransactionSize: 1294324
+NumOps: 38970
 PM id:0 has no corresponding pm control packet given by user!!!
 Save/Restore preemption code added for col8
 Header version 1.0
